@@ -1,0 +1,249 @@
+---
+title: "DA_football_viz"
+output:
+  html_document: default
+date: "2023-2-4"
+---
+### In this script I explore potential associations between the average score per game in each country with other factors, including GDP, Population, Country area, Total stadium number and Total stadium capacity
+
+
+## Package Setup
+```{r setup,  message=FALSE}
+library('tidyverse') # For data wrangling
+library('ggplot2') # For data visualization
+library('wesanderson') # Colour palette based on Wes Anderson movies
+library('plotly') # Non-essential package, but can be used to make plots interactive, an example is included below
+library('maptools') # For handling spatial objects such as maps
+library('ggnewscale') # Allows the definition of more than 1 colour/fill scale
+library('ggpubr') # For figure arrangement
+```
+
+
+## Data initialization
+### Here I am extracting the desired data, cleaning it up (primarily ensuring country name consistency across datasets), and getting it into the desired shape for visualization
+### Note, not all tables created here will be relevant for the final figure, they are however used in additional early exploration visualizations.
+
+```{r data_init, message=FALSE}
+
+# For this example, I will only be using the  world cup matches table, including individual matches and scores
+#There are a few notable judgment calls. 
+# 1) as this dataset includes historical data, some country names have changed. I have opted to consider only West Germany as Germany as on a few occasions West Germany played against East Germany and this would make the average scores unreliable. 
+# 2) Entries coded as Soviet Union are currently coded as 'Russia'
+# 3) Entries from England, Scotland, Wales and NI are coded as UK
+
+WCMatches <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2022/2022-11-29/wcmatches.csv')%>% #reading in the data from the source
+  mutate(home_team = if_else(home_team == 'West Germany', 'Germany', home_team), #renaming entries for consistency with other data sets
+         away_team = if_else(away_team == 'West Germany', 'Germany', away_team), 
+         home_team = if_else(home_team == 'England', 'UK', home_team), 
+         away_team = if_else(away_team == 'England', 'UK', away_team), 
+         home_team = if_else(home_team == 'Scotland', 'UK', home_team), 
+         away_team = if_else(away_team == 'Scotland', 'UK', away_team), 
+         home_team = if_else(home_team == 'Wales', 'UK', home_team), 
+         away_team = if_else(away_team == 'Wales', 'UK', away_team), 
+         home_team = if_else(home_team == 'Northern Ireland', 'UK', home_team), 
+         away_team = if_else(away_team == 'Northern Ireland', 'UK', away_team), 
+         home_team = if_else(home_team == 'Soviet Union', 'Russia', home_team), 
+         away_team = if_else(away_team == 'Soviet Union', 'Russia', away_team), 
+         home_team = if_else(home_team == 'United States', 'USA', home_team), 
+         away_team = if_else(away_team == 'United States', 'USA', away_team), 
+         home_team = if_else(home_team == 'China PR', 'China', home_team), 
+         away_team = if_else(away_team == 'China PR', 'China', away_team), 
+         home_team = if_else(home_team == 'Republic of Ireland', 'Ireland', home_team), 
+         away_team = if_else(away_team == 'Republic of Ireland', 'Ireland', away_team))
+
+# Adding historical estimates of GDP
+GDP <- readr::read_csv('https://raw.githubusercontent.com/datasets/gdp/master/data/gdp.csv')%>% # Reading in the data
+  mutate(`Country Name` = if_else(`Country Name` == 'United States', 'USA', `Country Name`), # renaming countries for consistency
+         `Country Name` = if_else(`Country Name` == 'United Kingdom', 'UK', `Country Name`))%>%
+  rename(GDP_bill = Value)%>% # giving the GDP column a more intuitive name
+  mutate(GDP_bill = round(GDP_bill/1000000000, 2)) # As these are very large values, I have recoded the GDP into GDP in billions for visualization purposes
+
+# Adding historical population estimates
+Population <- readr::read_csv('https://raw.githubusercontent.com/datasets/population/master/data/population.csv')%>% # Reading in the data
+  mutate(`Country Name` = if_else(`Country Name` == 'United States', 'USA', `Country Name`), # renaming countries for consistency
+         `Country Name` = if_else(`Country Name` == 'United Kingdom', 'UK', `Country Name`))%>%
+  rename(Population_mill = Value)%>% # giving the population column a more intuitive name
+  mutate(Population_mill = round(Population_mill/1000000, 2))# As these are very large values, I have recoded the population into population in millions for visualization purposes
+
+# Adding stadium data
+StadiumInfo <- read.csv("https://query.data.world/s/wescr24p625lrzys6anrmvegvonmnn", header=TRUE)%>% #reading in the data
+  mutate(Country = if_else(Country == 'United States of America', 'USA', Country), #renaming countries for consistency
+         Country = if_else(Country == 'England', 'UK', Country), 
+         Country = if_else(Country == 'Scotland', 'UK', Country), 
+         Country = if_else(Country == 'Wales', 'UK', Country), 
+         Country = if_else(Country == 'Northern Ireland', 'UK', Country))%>%
+  group_by(Country)%>% # grouping the data for summary statistics
+  summarize(total_capacity = round(sum(Capacity)/1000000, 2), # obtaining the total capacity number in millions
+            stadium_number = n()) # obtaining the total stadium number
+
+# Adding land area data
+LandArea <- read.csv('https://raw.githubusercontent.com/bnokoro/Data-Science/master/countries%20of%20the%20world.csv')%>% # reading in the data
+  separate(col = Country, into = c('country_name', 'sp'), sep = -1)%>% # cleaning the country names as they include a space after each name
+  select(1, 5)%>% # selecting only country name and land area columns
+  rename('area_sq_mi' = 'Area..sq..mi..')%>% # renaming the area column
+   mutate(country_name = if_else(country_name == 'United States', 'USA', country_name), # renaming country names for consistency
+         country_name = if_else(country_name == 'United Kingdom', 'UK', country_name), 
+         area_sq_mi = area_sq_mi/1000000) # As the area values are large, I am recoding them into millions of square miles
+
+# Adding spatial information
+MapData <- map_data("world")
+
+# Getting an estimate fo the geographical center of the countries
+GeoMiddle <- MapData%>%  # from the spatial representation of the data
+  group_by(region)%>% # grouped by region
+  summarize(group = first(group), # we extract the region ID
+            mean_lat = mean(lat), # get the mean latitude
+            mean_long = mean(long)) # get the mean longitude
+
+# Main table containing geographical, score, GDP, Population, and stadium information, collapsed across years
+MapInfo <- WCMatches%>% # based on the WC matches table
+  group_by(away_team)%>% # to group by country, I have made the arbitrary choice to use the away team 
+  mutate(total_away_games = n())%>%  # getting the total number of games per country (used to calculate the total average later)
+  summarize(total_away_games = first(total_away_games),total_away_score = sum(away_score))%>%  # keeping the total number of games value, getting the total away score and the average away score
+  full_join(WCMatches%>% group_by(home_team)%>%mutate(total_home_games = n())%>% summarize(total_home_games = first(total_home_games),total_home_score = sum(home_score)), by = c('away_team' = 'home_team'))%>% # joining with the WC matches table, but this time grouped by home team. This allows us to have the away and home values for each country using the away team order as a guide
+  mutate(total_games = total_home_games+total_away_games, # getting the total number of games played per country
+         total_score = total_home_score+total_away_score, # getting the total score of games played per country
+         average_score = total_score/total_games, # getting the total average score per country
+         home_benefit_games = total_home_games-total_away_games, # this gives us an estimate if countries played more at home than away
+         home_benefit_score = total_home_score/total_home_games-total_away_score/total_away_games)%>% # this gives un an indication of whether the countries scored more at home (based on average home and away scores)
+  right_join(MapData, by = c('away_team' = 'region'))%>% # adding geographical data (right joining so that we can create a map and not lose map information)
+  left_join(GeoMiddle, by = c('away_team' = 'region'))%>% # adding geographical center data. Here we are left joining to not remove any map data
+  left_join(GDP%>%filter(Year == 2015)%>%select(c(1, 4)), by = c('away_team' = 'Country Name'))%>% # adding gdp data. I am using the most recent estimate of GDP I have
+  left_join(Population%>%filter(Year == 2015)%>%select(c(1, 4)), by = c('away_team' = 'Country Name'))%>% # adding population data. I am using the most recent estimate of the population I have
+  left_join(StadiumInfo, by = c('away_team' = 'Country'))%>% # adding stadium data
+  left_join(LandArea, by = c('away_team' = 'country_name')) # adding land area data
+
+MapInfoDistinct <- MapInfo%>% # collapsing the map data information and getting distinct entries
+  select(-c(10:16))%>%
+  distinct()
+
+# getting a table with the historical score data
+InfoByYear <- GDP%>%# using the gdp data
+  inner_join(Population, by = c("Country Name", "Country Code", "Year"))%>% # adding the population data
+  inner_join(WCMatches %>% group_by(year, home_team)%>%summarize(total_home_score = sum(home_score), home_games = n())%>% select(year, home_team, total_home_score, home_games), by = c('Country Name' = 'home_team', 'Year' = 'year'))%>% # joining with the WC matches home data and home scores
+  inner_join(WCMatches %>% group_by(year, away_team)%>%summarize(total_away_score = sum(away_score), away_games = n())%>% select(year, away_team, total_away_score, away_games), by = c('Country Name' = 'away_team', 'Year' = 'year'))%>% # joining with the WC matches away data and away scores
+  mutate(total_score = total_away_score+total_home_score, 
+         total_games = home_games+away_games, 
+         average_score = total_score/total_games) # getting a total and an average score per year
+```
+
+
+## Exploratory Plots
+
+```{r Exp_plots,  message=FALSE, warning=FALSE}
+# an examination of the geographical characteristics of the total score
+# This plot will include an example of an interactive plot for demonstration purposes. The others do not have this functionality, because it takes a while to render
+ggplotly(
+MapInfo %>% ggplot(aes(x = long, y = lat, group = group.x, label=away_team)) +
+  geom_polygon(aes(fill = total_score), color = "black")+scale_fill_gradientn(colors = wes_palette("Zissou1", type = "continuous")) + theme_void()
+)
+
+# an examination of the geographical characteristics of the home benefit. It seems like the countries that have the highest total score (based on previous graph) have also played more at home
+MapInfo %>% ggplot(aes(x = long, y = lat, group = group.x)) +
+  geom_polygon(aes(fill = home_benefit_games), color = "black")+scale_fill_gradientn(colors = wes_palette("Zissou1", type = "continuous")) + theme_void()
+
+# an examination of the geographical characteristics of the home vs away score. The more blue a country looks, the higher home score they have. Here we are defining a second scale for the away score using the '+ new_scale' argument
+MapInfo %>% ggplot(aes(x = long, y = lat, group = group.x))  + theme_void()+
+  geom_polygon(aes(fill = total_home_score), color = "black" , alpha = 0.5) + scale_fill_gradient(low="white", high="blue", limits = c(0, 180))+
+   new_scale("fill") + geom_polygon(aes(fill = total_away_score), color = "black" , alpha = 0.5) + scale_fill_gradient(low="white", high="red", limits = c(0, 180))
+
+# an examination of the geographical characteristics of the number of stadiums. Poland has a surprising large number of football stadiums
+MapInfo %>%  ggplot(aes( x = long, y = lat, group = group.x)) +
+  geom_polygon(aes(fill = stadium_number), color = "black")+scale_fill_gradientn(colors = wes_palette("Zissou1", type = "continuous")) + theme_void()
+
+# an examination of the geographical characteristics of the total stadium capacity. We notice that the USA has an extremely large stadium capacity. However, upon inspection, the US football stadiums are American football stadiums, which is why in other examinations, I am filtering the US out 
+MapInfo %>% ggplot(aes( x = long, y = lat, group = group.x)) +
+  geom_polygon(aes(fill = total_capacity), color = "black")+scale_fill_gradientn(colors = wes_palette("Zissou1", type = "continuous")) + theme_void()
+
+# Examining how the home score benefit changes over time.Once again, no obvious trends. Apart from noticing that countries with higher total scores, also consistently score more at home
+InfoByYear %>% 
+  group_by(`Country Name`)%>% 
+  mutate(WCs_played= n(),home_benefit_score = total_home_score-total_away_score)%>%
+  filter(WCs_played> 7)%>%
+  ggplot(aes(Year, home_benefit_score, group = `Country Name`))+ geom_hline(yintercept = 0, colour = 'gray', size = 1)+ geom_line() + geom_point(aes(size = GDP_bill, colour = Population_mill))+scale_colour_gradientn(colors = wes_palette("Zissou1", type = "continuous")) + theme_minimal() + facet_wrap(~`Country Name`, ncol = 3, as.table = FALSE)
+
+
+```
+
+
+## Plots selected for figure
+```{r fin_plots,  message=FALSE}
+# This section contains the plots selected for the figure
+
+#The first one shows the geographical characteristics of the average country scores
+PlotA <- MapInfo %>% 
+  ggplot(aes(x = long, y = lat, group = group.x)) +
+  geom_polygon(aes(fill = average_score), color = "gray20")+
+  scale_fill_gradientn(colors = wes_palette("Zissou1", type = "continuous")) + 
+  theme_void()+
+  labs(fill = 'Average \ngame \nscore')+ 
+  theme(text = element_text(size = 16))
+
+# The second one shows a slight association between the average score and the distance from the equator, which does not seem to be affected by the area of the country
+PlotB <- MapInfoDistinct %>% 
+  ggplot(aes(abs(mean_lat), average_score)) + 
+  geom_point(aes(colour = area_sq_mi), size = 5, alpha = 0.5) + 
+  geom_smooth(method = 'lm', colour = 'red')+
+  scale_colour_gradientn(colors = wes_palette("Zissou1", type = "continuous")) + 
+  theme_minimal()+
+  ylab("Average game score")+
+  xlab("Distance from equator (latitude)")+
+  labs(colour = 'Area \nin mill \nsq mi')+ 
+  theme(text = element_text(size = 16))
+
+# The third one shows the association between stadium capacity, the total number of games played and the average score. There seems to be a positive correlation between the average score and the stadium capacity as well as with the number of games. Maybe the countries that are the most interested in football (and go to watch football often) tend to be better and therefore qualify more often? 
+PlotC <- MapInfoDistinct %>% 
+  filter(away_team != 'USA')%>% 
+  ggplot(aes(total_capacity, average_score)) + 
+  geom_point(aes(colour = total_games), alpha = 0.5, size = 5) + 
+  geom_smooth(method = 'lm', colour = 'red')+
+  scale_colour_gradientn(colors = wes_palette("Zissou1", type = "continuous")) + 
+  theme_minimal()+
+  ylab("Average game score")+
+  xlab("Total stadium capacity (in millions)")+
+  labs(colour = 'Total \ngames')+ 
+  theme(text = element_text(size = 16))
+
+# The final plot shows how the average score changes across time. There are no obvious trends and those do not seem to be associated with GDP or population size
+PlotD <- InfoByYear %>%
+  group_by(`Country Name`)%>%
+  mutate(WCs_played = n())%>%
+  filter(WCs_played > 7)%>%
+  ggplot(aes(Year, average_score, group = `Country Name`))+ 
+  geom_line() + 
+  geom_point(aes(size = GDP_bill, colour = Population_mill))+
+  scale_colour_gradientn(colors = wes_palette("Zissou1", type = "continuous")) + 
+  scale_x_continuous(breaks=c(1970, 1990, 2010))+ 
+  scale_y_continuous(breaks=c(0, 1, 2, 3))+
+  theme_minimal()+ 
+  ylab("Avergae game score")+ 
+  labs(colour = "Population \nin millions", size = 'GDP in \nbillions') + 
+  facet_wrap(~`Country Name`, ncol = 3, as.table = FALSE)+ 
+  theme(text = element_text(size = 16))
+```
+
+## Creating and saving the figure
+```{r output,  message=FALSE, warning=FALSE}
+# arranging the plots in a 2x2 grid
+Figure0 <- ggarrange(
+  PlotA,                
+  PlotB,
+  PlotC,
+  PlotD,
+  nrow = 2, 
+  ncol = 2,
+  labels = c('A', 'B', 'C' , 'D'), 
+  font.label=list(size=20)
+)
+
+FigureText <- '\nFig1. Figure examining the average country football score per game (across home and away games). A) Geographical representation of the average score. B) Positive correlation between average score and distance from equator, expressed in absolute latitude units. The colour respresents the country land area, which does not appear to be associated with the score. C) Positive correlation between the average score and the total stadium capacity. The colour represents the number of games played, which also appears to be linked to the average score. This plot suggests that football enthusiasm might be linked to performance. D) No average score trends across time and no associations with GDP or Population size.'
+
+FigureParagraph <- ggparagraph(text = FigureText, size = 14, color = "black")
+
+Figure <- ggarrange(Figure0, FigureParagraph, ncol = 1, nrow = 2, heights = c(1, 0.15))
+
+# saving the figure
+ggexport(Figure, filename = "Arabadzhiyska_Desislava_DataVizCompetition.png", height = 800, width = 1200)
+
+```
+
